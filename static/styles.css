@@ -1,235 +1,318 @@
-<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Internal Audit System</title>
-    <link rel="stylesheet" href="/static/styles.css" />
-  </head>
-  <body>
-    <div class="app-shell">
-      <aside class="sidebar">
-        <h1>Internal Audit</h1>
-        <nav>
-          <a href="#overview">Overview</a>
-          <a href="#engagements">Engagements</a>
-          <a href="#risks">Risk Register</a>
-          <a href="#controls">Controls</a>
-          <a href="#findings">Findings</a>
-          <a href="#actions">Actions</a>
-        </nav>
-      </aside>
+const API = '/api';
 
-      <main class="content">
-        <header class="topbar">
-          <div>
-            <p class="eyebrow">Audit Management</p>
-            <h2>Dashboard</h2>
-          </div>
-          <div class="status-pill">System Ready</div>
-        </header>
+const state = {
+  token: localStorage.getItem('audit_token') || '',
+  user: JSON.parse(localStorage.getItem('audit_user') || 'null'),
+};
 
-        <section id="overview" class="stats-grid">
-          <div class="stat-card accent-blue">
-            <label>Total Engagements</label>
-            <strong id="engagements-count">0</strong>
-          </div>
-          <div class="stat-card accent-orange">
-            <label>Active Risks</label>
-            <strong id="risks-count">0</strong>
-          </div>
-          <div class="stat-card accent-green">
-            <label>Controls</label>
-            <strong id="controls-count">0</strong>
-          </div>
-          <div class="stat-card accent-purple">
-            <label>Open Findings</label>
-            <strong id="findings-count">0</strong>
-          </div>
-          <div class="stat-card accent-red">
-            <label>Action Items</label>
-            <strong id="actions-count">0</strong>
-          </div>
-        </section>
+function showAuth() {
+  document.getElementById('auth-shell').style.display = 'flex';
+  document.getElementById('app-shell').classList.add('hidden');
+}
 
-        <section class="two-column">
-          <div class="panel">
-            <h3>Create Audit Engagement</h3>
-            <form id="engagement-form">
-              <input name="name" placeholder="Engagement name" required />
-              <textarea name="description" placeholder="Description"></textarea>
-              <select name="department_id" id="department-select" required></select>
-              <select name="status">
-                <option>Planned</option>
-                <option>In Progress</option>
-                <option>Completed</option>
-              </select>
-              <input type="date" name="start_date" />
-              <input type="date" name="end_date" />
-              <button type="submit">Add Engagement</button>
-            </form>
-          </div>
+function showApp() {
+  document.getElementById('auth-shell').style.display = 'none';
+  document.getElementById('app-shell').classList.remove('hidden');
+}
 
-          <div class="panel">
-            <h3>Create Risk</h3>
-            <form id="risk-form">
-              <input name="title" placeholder="Risk title" required />
-              <input name="owner" placeholder="Owner" />
-              <select name="category">
-                <option>Financial</option>
-                <option>Operational</option>
-                <option>Cybersecurity</option>
-                <option>Compliance</option>
-              </select>
-              <select name="likelihood">
-                <option>Low</option>
-                <option>Medium</option>
-                <option>High</option>
-              </select>
-              <select name="impact">
-                <option>Low</option>
-                <option>Medium</option>
-                <option>High</option>
-              </select>
-              <select name="status">
-                <option>Open</option>
-                <option>Monitoring</option>
-                <option>Mitigated</option>
-              </select>
-              <button type="submit">Add Risk</button>
-            </form>
-          </div>
-        </section>
+function setUserBadge(user) {
+  const badge = document.getElementById('user-badge');
+  badge.textContent = user ? `${user.full_name || user.username} (${user.role})` : 'Not signed in';
+}
 
-        <section class="two-column">
-          <div class="panel">
-            <h3>Create Control</h3>
-            <form id="control-form">
-              <input name="title" placeholder="Control title" required />
-              <input name="owner" placeholder="Owner" />
-              <select name="category">
-                <option>Process</option>
-                <option>IT</option>
-                <option>Finance</option>
-                <option>HR</option>
-              </select>
-              <select name="control_type">
-                <option>Preventive</option>
-                <option>Detective</option>
-                <option>Corrective</option>
-              </select>
-              <select name="status">
-                <option>Effective</option>
-                <option>Needs Improvement</option>
-                <option>Not Applicable</option>
-              </select>
-              <button type="submit">Add Control</button>
-            </form>
-          </div>
+function getHeaders(extra = {}) {
+  return {
+    ...extra,
+    'Content-Type': 'application/json',
+    ...(state.token ? { Authorization: `Bearer ${state.token}` } : {}),
+  };
+}
 
-          <div class="panel">
-            <h3>Create Finding</h3>
-            <form id="finding-form">
-              <select name="engagement_id" id="engagement-select" required></select>
-              <input name="title" placeholder="Finding title" required />
-              <textarea name="description" placeholder="Description"></textarea>
-              <input name="owner" placeholder="Owner" />
-              <select name="severity">
-                <option>Low</option>
-                <option>Moderate</option>
-                <option>High</option>
-                <option>Critical</option>
-              </select>
-              <select name="status">
-                <option>Open</option>
-                <option>In Progress</option>
-                <option>Resolved</option>
-              </select>
-              <input type="number" name="risk_id" placeholder="Risk ID (optional)" />
-              <input type="number" name="control_id" placeholder="Control ID (optional)" />
-              <button type="submit">Add Finding</button>
-            </form>
-          </div>
-        </section>
+async function fetchJson(url, options = {}) {
+  const response = await fetch(`${API}${url}`, {
+    ...options,
+    headers: getHeaders(options.headers || {}),
+  });
 
-        <section class="two-column">
-          <div class="panel">
-            <h3>Create Action Item</h3>
-            <form id="action-form">
-              <select name="finding_id" id="finding-select" required></select>
-              <input name="title" placeholder="Action title" required />
-              <input name="owner" placeholder="Owner" />
-              <input type="date" name="due_date" />
-              <select name="status">
-                <option>Open</option>
-                <option>In Progress</option>
-                <option>Completed</option>
-              </select>
-              <button type="submit">Add Action</button>
-            </form>
-          </div>
-          <div class="panel">
-            <h3>Departments</h3>
-            <form id="department-form">
-              <input name="name" placeholder="Department name" required />
-              <button type="submit">Add Department</button>
-            </form>
-            <ul id="department-list" class="list"></ul>
-          </div>
-        </section>
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(errorText || 'Request failed');
+  }
 
-        <section id="engagements" class="panel table-panel">
-          <h3>Audit Engagements</h3>
-          <table>
-            <thead>
-              <tr><th>Name</th><th>Status</th><th>Department</th><th>Start</th><th>End</th></tr>
-            </thead>
-            <tbody id="engagement-table"></tbody>
-          </table>
-        </section>
+  return response.json();
+}
 
-        <section id="risks" class="panel table-panel">
-          <h3>Risk Register</h3>
-          <table>
-            <thead>
-              <tr><th>Title</th><th>Owner</th><th>Category</th><th>Likelihood</th><th>Impact</th><th>Status</th></tr>
-            </thead>
-            <tbody id="risk-table"></tbody>
-          </table>
-        </section>
+async function login({ username, password }) {
+  const payload = await fetchJson('/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ username, password }),
+  });
 
-        <section id="controls" class="panel table-panel">
-          <h3>Controls Library</h3>
-          <table>
-            <thead>
-              <tr><th>Title</th><th>Owner</th><th>Category</th><th>Type</th><th>Status</th></tr>
-            </thead>
-            <tbody id="control-table"></tbody>
-          </table>
-        </section>
+  state.token = payload.access_token;
+  state.user = payload.user;
+  localStorage.setItem('audit_token', state.token);
+  localStorage.setItem('audit_user', JSON.stringify(state.user));
+  setUserBadge(state.user);
+  showApp();
+  await refreshAll();
+}
 
-        <section id="findings" class="panel table-panel">
-          <h3>Findings</h3>
-          <table>
-            <thead>
-              <tr><th>Title</th><th>Severity</th><th>Status</th><th>Owner</th><th>Engagement</th></tr>
-            </thead>
-            <tbody id="finding-table"></tbody>
-          </table>
-        </section>
+async function logout() {
+  state.token = '';
+  state.user = null;
+  localStorage.removeItem('audit_token');
+  localStorage.removeItem('audit_user');
+  setUserBadge(null);
+  showAuth();
+}
 
-        <section id="actions" class="panel table-panel">
-          <h3>Action Items</h3>
-          <table>
-            <thead>
-              <tr><th>Title</th><th>Owner</th><th>Due Date</th><th>Status</th></tr>
-            </thead>
-            <tbody id="action-table"></tbody>
-          </table>
-        </section>
-      </main>
-    </div>
+async function loadUserProfile() {
+  if (!state.token) {
+    showAuth();
+    return;
+  }
 
-    <script src="/static/app.js"></script>
-  </body>
-</html>
+  try {
+    const user = await fetchJson('/auth/me');
+    state.user = user;
+    localStorage.setItem('audit_user', JSON.stringify(user));
+    setUserBadge(user);
+    showApp();
+  } catch (error) {
+    console.error(error);
+    logout();
+  }
+}
+
+async function loadDashboard() {
+  const summary = await fetchJson('/dashboard');
+  document.getElementById('engagements-count').textContent = summary.engagements;
+  document.getElementById('risks-count').textContent = summary.risks;
+  document.getElementById('controls-count').textContent = summary.controls;
+  document.getElementById('findings-count').textContent = summary.open_findings;
+  document.getElementById('actions-count').textContent = summary.action_items;
+}
+
+async function loadDepartments() {
+  const departments = await fetchJson('/departments');
+  const select = document.getElementById('department-select');
+  const list = document.getElementById('department-list');
+
+  select.innerHTML = departments.map((d) => `<option value="${d.id}">${d.name}</option>`).join('');
+  list.innerHTML = departments.map((d) => `<li>${d.name}</li>`).join('');
+}
+
+async function loadEngagements() {
+  const engagements = await fetchJson('/audit-engagements');
+  const table = document.getElementById('engagement-table');
+  const select = document.getElementById('engagement-select');
+
+  table.innerHTML = engagements.map((item) => `
+    <tr>
+      <td>${item.name}</td>
+      <td>${item.status}</td>
+      <td>${item.department_id}</td>
+      <td>${item.start_date}</td>
+      <td>${item.end_date || '—'}</td>
+    </tr>
+  `).join('');
+
+  select.innerHTML = engagements.map((item) => `<option value="${item.id}">${item.name}</option>`).join('');
+}
+
+async function loadRisks() {
+  const risks = await fetchJson('/risks');
+  document.getElementById('risk-table').innerHTML = risks.map((item) => `
+    <tr>
+      <td>${item.title}</td>
+      <td>${item.owner || '—'}</td>
+      <td>${item.category}</td>
+      <td>${item.likelihood}</td>
+      <td>${item.impact}</td>
+      <td>${item.status}</td>
+    </tr>
+  `).join('');
+}
+
+async function loadControls() {
+  const controls = await fetchJson('/controls');
+  document.getElementById('control-table').innerHTML = controls.map((item) => `
+    <tr>
+      <td>${item.title}</td>
+      <td>${item.owner || '—'}</td>
+      <td>${item.category}</td>
+      <td>${item.control_type}</td>
+      <td>${item.status}</td>
+    </tr>
+  `).join('');
+}
+
+async function loadFindings() {
+  const findings = await fetchJson('/findings');
+  const select = document.getElementById('finding-select');
+
+  document.getElementById('finding-table').innerHTML = findings.map((item) => `
+    <tr>
+      <td>${item.title}</td>
+      <td>${item.severity}</td>
+      <td>${item.status}</td>
+      <td>${item.owner || '—'}</td>
+      <td>${item.engagement_id}</td>
+    </tr>
+  `).join('');
+
+  select.innerHTML = findings.map((item) => `<option value="${item.id}">${item.title}</option>`).join('');
+}
+
+async function loadActions() {
+  const actions = await fetchJson('/action-items');
+  document.getElementById('action-table').innerHTML = actions.map((item) => `
+    <tr>
+      <td>${item.title}</td>
+      <td>${item.owner || '—'}</td>
+      <td>${item.due_date || '—'}</td>
+      <td>${item.status}</td>
+    </tr>
+  `).join('');
+}
+
+async function refreshAll() {
+  await Promise.all([
+    loadDashboard(),
+    loadDepartments(),
+    loadEngagements(),
+    loadRisks(),
+    loadControls(),
+    loadFindings(),
+    loadActions(),
+  ]);
+}
+
+function bindForm(formId, endpoint, serializer) {
+  const form = document.getElementById(formId);
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const formData = Object.fromEntries(new FormData(form).entries());
+    const payload = serializer(formData);
+
+    try {
+      await fetchJson(endpoint, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      form.reset();
+      await refreshAll();
+    } catch (error) {
+      alert(error.message);
+    }
+  });
+}
+
+function serializeDepartment(data) {
+  return { name: String(data.name || '').trim() };
+}
+
+function serializeEngagement(data) {
+  return {
+    name: String(data.name || '').trim(),
+    description: String(data.description || '').trim(),
+    department_id: Number(data.department_id),
+    status: String(data.status || 'Planned'),
+    start_date: data.start_date || new Date().toISOString().slice(0, 10),
+    end_date: data.end_date || null,
+  };
+}
+
+function serializeRisk(data) {
+  return {
+    title: String(data.title || '').trim(),
+    owner: String(data.owner || '').trim(),
+    category: String(data.category || 'Operational'),
+    likelihood: String(data.likelihood || 'Medium'),
+    impact: String(data.impact || 'Medium'),
+    status: String(data.status || 'Open'),
+  };
+}
+
+function serializeControl(data) {
+  return {
+    title: String(data.title || '').trim(),
+    owner: String(data.owner || '').trim(),
+    category: String(data.category || 'Process'),
+    control_type: String(data.control_type || 'Preventive'),
+    status: String(data.status || 'Effective'),
+  };
+}
+
+function serializeFinding(data) {
+  return {
+    engagement_id: Number(data.engagement_id),
+    title: String(data.title || '').trim(),
+    description: String(data.description || '').trim(),
+    owner: String(data.owner || '').trim(),
+    severity: String(data.severity || 'Moderate'),
+    status: String(data.status || 'Open'),
+    risk_id: data.risk_id ? Number(data.risk_id) : null,
+    control_id: data.control_id ? Number(data.control_id) : null,
+  };
+}
+
+function serializeAction(data) {
+  return {
+    finding_id: Number(data.finding_id),
+    title: String(data.title || '').trim(),
+    owner: String(data.owner || '').trim(),
+    due_date: data.due_date || null,
+    status: String(data.status || 'Open'),
+  };
+}
+
+async function exportReport(type) {
+  const url = `/reports/export/${type}`;
+  const response = await fetch(`${API}${url}`, { headers: { Authorization: `Bearer ${state.token}` } });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || 'Export failed');
+  }
+
+  const blob = await response.blob();
+  const fileName = type === 'csv' ? 'internal_audit_export.csv' : 'internal_audit_export.xlsx';
+  const downloadUrl = window.URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = downloadUrl;
+  anchor.download = fileName;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.URL.revokeObjectURL(downloadUrl);
+}
+
+document.getElementById('login-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const formData = new FormData(event.target);
+  const payload = Object.fromEntries(formData.entries());
+
+  try {
+    await login(payload);
+  } catch (error) {
+    alert(error.message);
+  }
+});
+
+document.getElementById('logout-btn').addEventListener('click', logout);
+
+document.getElementById('export-csv').addEventListener('click', () => exportReport('csv'));
+document.getElementById('export-xlsx').addEventListener('click', () => exportReport('xlsx'));
+
+bindForm('department-form', '/departments', serializeDepartment);
+bindForm('engagement-form', '/audit-engagements', serializeEngagement);
+bindForm('risk-form', '/risks', serializeRisk);
+bindForm('control-form', '/controls', serializeControl);
+bindForm('finding-form', '/findings', serializeFinding);
+bindForm('action-form', '/action-items', serializeAction);
+
+if (state.token) {
+  loadUserProfile().then(refreshAll).catch(logout);
+} else {
+  showAuth();
+}
