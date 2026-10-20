@@ -1,14 +1,24 @@
-from fastapi import FastAPI, HTTPException
+from __future__ import annotations
+
+import os
+from datetime import date, datetime, timedelta, timezone
+from typing import List
+
+import bcrypt
+import jwt
+from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import create_engine, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
-from typing import List
-from pydantic import BaseModel, ConfigDict, Field
-from datetime import date
 
-DATABASE_URL = "sqlite:///./audit_system.db"
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./audit_system.db")
+SECRET_KEY = os.getenv("SECRET_KEY", "internal-audit-system-dev-secret")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))
 
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -18,12 +28,31 @@ class Base(DeclarativeBase):
     pass
 
 
+class UserRole:
+    ADMIN = "ADMIN"
+    AUDITOR = "AUDITOR"
+    MANAGER = "MANAGER"
+    VIEWER = "VIEWER"
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    username: Mapped[str] = mapped_column(unique=True, index=True)
+    full_name: Mapped[str] = mapped_column(default="")
+    email: Mapped[str] = mapped_column(default="")
+    role: Mapped[str] = mapped_column(default=UserRole.VIEWER)
+    hashed_password: Mapped[str] = mapped_column(default="")
+
+    engagements: Mapped[List["AuditEngagement"]] = relationship(back_populates="owner")
+
+
 class Department(Base):
     __tablename__ = "departments"
 
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
     name: Mapped[str] = mapped_column(unique=True, index=True)
-
     engagements: Mapped[List["AuditEngagement"]] = relationship(back_populates="department")
 
 
@@ -34,11 +63,13 @@ class AuditEngagement(Base):
     name: Mapped[str] = mapped_column(index=True)
     description: Mapped[str] = mapped_column(default="")
     department_id: Mapped[int] = mapped_column(index=True)
+    owner_id: Mapped[int | None] = mapped_column(index=True, default=None)
     status: Mapped[str] = mapped_column(default="Planned")
     start_date: Mapped[date] = mapped_column(default=date.today)
     end_date: Mapped[date | None] = mapped_column(default=None, nullable=True)
 
     department: Mapped[Department] = relationship(back_populates="engagements")
+    owner: Mapped[User | None] = relationship(back_populates="engagements")
     findings: Mapped[List["Finding"]] = relationship(back_populates="engagement")
 
 
@@ -52,7 +83,6 @@ class Risk(Base):
     likelihood: Mapped[str] = mapped_column(default="Medium")
     impact: Mapped[str] = mapped_column(default="Medium")
     status: Mapped[str] = mapped_column(default="Open")
-
     findings: Mapped[List["Finding"]] = relationship(back_populates="risk")
 
 
@@ -65,7 +95,6 @@ class Control(Base):
     owner: Mapped[str] = mapped_column(default="")
     control_type: Mapped[str] = mapped_column(default="Preventive")
     status: Mapped[str] = mapped_column(default="Effective")
-
     findings: Mapped[List["Finding"]] = relationship(back_populates="control")
 
 
@@ -97,7 +126,6 @@ class ActionItem(Base):
     owner: Mapped[str] = mapped_column(default="")
     due_date: Mapped[date | None] = mapped_column(default=None, nullable=True)
     status: Mapped[str] = mapped_column(default="Open")
-
     finding: Mapped[Finding] = relationship(back_populates="action_items")
 
 
@@ -112,52 +140,162 @@ def get_db():
         db.close()
 
 
+security = HTTPBearer()
+
+
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def verify_password(password: str, hashed_password: str) -> bool:
+    try:
+        return bcrypt.checkpw(password.encode("utf-8"), hashed_password.encode("utf-8"))
+    except ValueError:
+        return False
+
+
+def create_access_token(subject: str) -> str:
+    expires = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    payload = {"sub": subject, "exp": expires}
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db),
+) -> User:
+    token = credentials.credentials
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str | None = payload.get("sub")
+        if username is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+    except jwt.PyJWTError as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token") from exc
+
+    user = db.query(User).filter(User.username == username).first()
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+    return user
+
+
+def require_roles(*allowed_roles: str):
+    def dependency(current_user: User = Depends(get_current_user)) -> User:
+        if current_user.role not in allowed_roles:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permission denied")
+        return current_user
+
+    return dependency
+
+
 def seed_data(db: Session):
+    if db.query(User).count() == 0:
+        admin = User(
+            username="admin",
+            full_name="System Administrator",
+            email="admin@audit.local",
+            role=UserRole.ADMIN,
+            hashed_password=hash_password("admin123"),
+        )
+        db.add(admin)
+        db.commit()
+
     if db.query(Department).count() == 0:
         departments = [
             Department(name="Finance"),
             Department(name="IT Operations"),
             Department(name="Human Resources"),
+            Department(name="Procurement"),
         ]
         db.add_all(departments)
         db.commit()
 
     if db.query(AuditEngagement).count() == 0:
+        admin = db.query(User).filter(User.username == "admin").first()
         finance = db.query(Department).filter(Department.name == "Finance").first()
         it = db.query(Department).filter(Department.name == "IT Operations").first()
 
-        db.add_all([
-            AuditEngagement(
-                name="Quarterly Finance Controls Review",
-                description="Assessment of cash disbursements and reconciliations.",
-                department_id=finance.id,
-                status="In Progress",
-                start_date=date(2026, 10, 1),
-                end_date=date(2026, 10, 20),
-            ),
-            AuditEngagement(
-                name="IT Access Governance Review",
-                description="Review of privileged account provisioning and review controls.",
-                department_id=it.id,
-                status="Planned",
-                start_date=date(2026, 11, 5),
-                end_date=date(2026, 11, 30),
-            ),
-        ])
+        db.add_all(
+            [
+                AuditEngagement(
+                    name="Quarterly Finance Controls Review",
+                    description="Assessment of cash disbursements and reconciliations.",
+                    department_id=finance.id,
+                    owner_id=admin.id,
+                    status="In Progress",
+                    start_date=date(2026, 10, 1),
+                    end_date=date(2026, 10, 20),
+                ),
+                AuditEngagement(
+                    name="IT Access Governance Review",
+                    description="Review of privileged account provisioning and review controls.",
+                    department_id=it.id,
+                    owner_id=admin.id,
+                    status="Planned",
+                    start_date=date(2026, 11, 5),
+                    end_date=date(2026, 11, 30),
+                ),
+            ]
+        )
         db.commit()
 
     if db.query(Risk).count() == 0:
-        db.add_all([
-            Risk(title="Vendor payment fraud", category="Financial", owner="Controller", likelihood="High", impact="High", status="Open"),
-            Risk(title="Unapproved system access", category="Cybersecurity", owner="IAM Lead", likelihood="Medium", impact="High", status="Monitoring"),
-        ])
+        db.add_all(
+            [
+                Risk(
+                    title="Vendor payment fraud",
+                    category="Financial",
+                    owner="Controller",
+                    likelihood="High",
+                    impact="High",
+                    status="Open",
+                ),
+                Risk(
+                    title="Unapproved system access",
+                    category="Cybersecurity",
+                    owner="IAM Lead",
+                    likelihood="Medium",
+                    impact="High",
+                    status="Monitoring",
+                ),
+                Risk(
+                    title="Payroll exception processing",
+                    category="Operational",
+                    owner="Payroll Manager",
+                    likelihood="Medium",
+                    impact="Medium",
+                    status="Open",
+                ),
+            ]
+        )
         db.commit()
 
     if db.query(Control).count() == 0:
-        db.add_all([
-            Control(title="Three-way match review", category="Accounts Payable", owner="AP Manager", control_type="Detective", status="Effective"),
-            Control(title="Periodic access recertification", category="Access Management", owner="IT Security", control_type="Preventive", status="Needs Improvement"),
-        ])
+        db.add_all(
+            [
+                Control(
+                    title="Three-way match review",
+                    category="Accounts Payable",
+                    owner="AP Manager",
+                    control_type="Detective",
+                    status="Effective",
+                ),
+                Control(
+                    title="Periodic access recertification",
+                    category="Access Management",
+                    owner="IT Security",
+                    control_type="Preventive",
+                    status="Needs Improvement",
+                ),
+                Control(
+                    title="Payroll approval matrix",
+                    category="HR",
+                    owner="Payroll Manager",
+                    control_type="Preventive",
+                    status="Effective",
+                ),
+            ]
+        )
         db.commit()
 
     if db.query(Finding).count() == 0:
@@ -165,28 +303,31 @@ def seed_data(db: Session):
         risk = db.query(Risk).first()
         control = db.query(Control).first()
 
-        finding = Finding(
-            engagement_id=engagement.id,
-            title="Weekly payment approvals were not consistently documented",
-            description="The review process lacked evidence for a sample of disbursements.",
-            severity="High",
-            status="Open",
-            risk_id=risk.id,
-            control_id=control.id,
-            owner="Finance Manager",
+        db.add(
+            Finding(
+                engagement_id=engagement.id,
+                title="Weekly payment approvals were not consistently documented",
+                description="The review process lacked evidence for a sample of disbursements.",
+                severity="High",
+                status="Open",
+                risk_id=risk.id,
+                control_id=control.id,
+                owner="Finance Manager",
+            )
         )
-        db.add(finding)
         db.commit()
 
     if db.query(ActionItem).count() == 0:
         finding = db.query(Finding).first()
-        db.add(ActionItem(
-            finding_id=finding.id,
-            title="Establish documented approval evidence checklist",
-            owner="Finance Manager",
-            due_date=date(2026, 10, 25),
-            status="Open",
-        ))
+        db.add(
+            ActionItem(
+                finding_id=finding.id,
+                title="Establish documented approval evidence checklist",
+                owner="Finance Manager",
+                due_date=date(2026, 10, 25),
+                status="Open",
+            )
+        )
         db.commit()
 
 
@@ -194,8 +335,7 @@ with SessionLocal() as db:
     seed_data(db)
 
 
-app = FastAPI(title="Internal Audit System")
-
+app = FastAPI(title="Internal Audit System", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -203,8 +343,35 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+
+class UserRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    username: str
+    full_name: str
+    email: str
+    role: str
+
+
+class UserCreate(BaseModel):
+    username: str
+    password: str
+    full_name: str = ""
+    email: str = ""
+    role: str = UserRole.AUDITOR
+
+
+class UserLogin(BaseModel):
+    username: str
+    password: str
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserRead | None = None
 
 
 class DepartmentRead(BaseModel):
@@ -223,6 +390,7 @@ class EngagementRead(BaseModel):
     name: str
     description: str
     department_id: int
+    owner_id: int | None = None
     status: str
     start_date: date
     end_date: date | None = None
@@ -232,6 +400,7 @@ class EngagementCreate(BaseModel):
     name: str
     description: str = ""
     department_id: int
+    owner_id: int | None = None
     status: str = "Planned"
     start_date: date = Field(default_factory=date.today)
     end_date: date | None = None
@@ -319,7 +488,50 @@ class ActionItemCreate(BaseModel):
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "service": "internal-audit-system"}
+
+
+@app.post("/api/auth/register", response_model=UserRead)
+def register_user(payload: UserCreate, db: Session = Depends(get_db)):
+    existing = db.query(User).filter(User.username == payload.username).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Username already exists")
+
+    if payload.role not in {UserRole.ADMIN, UserRole.AUDITOR, UserRole.MANAGER, UserRole.VIEWER}:
+        raise HTTPException(status_code=400, detail="Invalid role")
+
+    user = User(
+        username=payload.username,
+        full_name=payload.full_name,
+        email=payload.email,
+        role=payload.role,
+        hashed_password=hash_password(payload.password),
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+@app.post("/api/auth/login", response_model=TokenResponse)
+def login_user(payload: UserLogin, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.username == payload.username).first()
+    if not user or not verify_password(payload.password, user.hashed_password):
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    token = create_access_token(user.username)
+    return TokenResponse(access_token=token, user=UserRead.model_validate(user))
+
+
+@app.get("/api/auth/me", response_model=UserRead)
+def get_me(current_user: User = Depends(get_current_user)):
+    return current_user
+
+
+@app.get("/api/users", response_model=list[UserRead])
+def list_users(current_user: User = Depends(require_roles(UserRole.ADMIN, UserRole.AUDITOR))):
+    with SessionLocal() as db:
+        return db.query(User).order_by(User.username).all()
 
 
 @app.get("/api/departments", response_model=list[DepartmentRead])
@@ -329,7 +541,10 @@ def get_departments():
 
 
 @app.post("/api/departments", response_model=DepartmentRead)
-def create_department(payload: DepartmentCreate):
+def create_department(
+    payload: DepartmentCreate,
+    current_user: User = Depends(require_roles(UserRole.ADMIN, UserRole.AUDITOR, UserRole.MANAGER)),
+):
     with SessionLocal() as db:
         item = Department(name=payload.name.strip())
         db.add(item)
@@ -337,8 +552,8 @@ def create_department(payload: DepartmentCreate):
             db.commit()
             db.refresh(item)
             return item
-        except Exception:
-            raise HTTPException(status_code=400, detail="Department already exists")
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Department already exists") from exc
 
 
 @app.get("/api/audit-engagements", response_model=list[EngagementRead])
@@ -348,11 +563,16 @@ def get_engagements():
 
 
 @app.post("/api/audit-engagements", response_model=EngagementRead)
-def create_engagement(payload: EngagementCreate):
+def create_engagement(
+    payload: EngagementCreate,
+    current_user: User = Depends(require_roles(UserRole.ADMIN, UserRole.AUDITOR, UserRole.MANAGER)),
+):
     with SessionLocal() as db:
         if not db.query(Department).filter(Department.id == payload.department_id).first():
             raise HTTPException(status_code=404, detail="Department not found")
         item = AuditEngagement(**payload.model_dump())
+        if payload.owner_id is None:
+            item.owner_id = current_user.id
         db.add(item)
         db.commit()
         db.refresh(item)
@@ -366,7 +586,10 @@ def get_risks():
 
 
 @app.post("/api/risks", response_model=RiskRead)
-def create_risk(payload: RiskCreate):
+def create_risk(
+    payload: RiskCreate,
+    current_user: User = Depends(require_roles(UserRole.ADMIN, UserRole.AUDITOR, UserRole.MANAGER)),
+):
     with SessionLocal() as db:
         item = Risk(**payload.model_dump())
         db.add(item)
@@ -382,7 +605,10 @@ def get_controls():
 
 
 @app.post("/api/controls", response_model=ControlRead)
-def create_control(payload: ControlCreate):
+def create_control(
+    payload: ControlCreate,
+    current_user: User = Depends(require_roles(UserRole.ADMIN, UserRole.AUDITOR, UserRole.MANAGER)),
+):
     with SessionLocal() as db:
         item = Control(**payload.model_dump())
         db.add(item)
@@ -398,7 +624,10 @@ def get_findings():
 
 
 @app.post("/api/findings", response_model=FindingRead)
-def create_finding(payload: FindingCreate):
+def create_finding(
+    payload: FindingCreate,
+    current_user: User = Depends(require_roles(UserRole.ADMIN, UserRole.AUDITOR, UserRole.MANAGER)),
+):
     with SessionLocal() as db:
         if not db.query(AuditEngagement).filter(AuditEngagement.id == payload.engagement_id).first():
             raise HTTPException(status_code=404, detail="Audit engagement not found")
@@ -420,7 +649,10 @@ def get_action_items():
 
 
 @app.post("/api/action-items", response_model=ActionItemRead)
-def create_action_item(payload: ActionItemCreate):
+def create_action_item(
+    payload: ActionItemCreate,
+    current_user: User = Depends(require_roles(UserRole.ADMIN, UserRole.AUDITOR, UserRole.MANAGER)),
+):
     with SessionLocal() as db:
         if not db.query(Finding).filter(Finding.id == payload.finding_id).first():
             raise HTTPException(status_code=404, detail="Finding not found")
@@ -440,6 +672,18 @@ def dashboard_summary():
             "controls": db.query(Control).count(),
             "open_findings": db.query(Finding).filter(Finding.status == "Open").count(),
             "action_items": db.query(ActionItem).count(),
+            "users": db.query(User).count(),
+        }
+
+
+@app.get("/api/reports/summary")
+def report_summary():
+    with SessionLocal() as db:
+        engagement_summary = db.query(AuditEngagement.status, func.count(AuditEngagement.id)).group_by(AuditEngagement.status).all()
+        finding_summary = db.query(Finding.severity, func.count(Finding.id)).group_by(Finding.severity).all()
+        return {
+            "engagement_status": [{"status": status, "count": count} for status, count in engagement_summary],
+            "finding_severity": [{"severity": severity, "count": count} for severity, count in finding_summary],
         }
 
 
@@ -451,9 +695,3 @@ def index():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
-
-
-"""
-This project was generated for an Internal Audit System MVP. The app uses SQLite for local persistence
-and a lightweight HTML/JS frontend for dashboard operations.
-"""
